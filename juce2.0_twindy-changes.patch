@@ -1,0 +1,172 @@
+diff -U 3 -H -b -B -d -r -N -- modules.old/juce_events/messages/juce_MessageManager.cpp modules/juce_events/messages/juce_MessageManager.cpp
+--- modules.old/juce_events/messages/juce_MessageManager.cpp	2012-09-10 11:15:51.000000000 +0100
++++ modules/juce_events/messages/juce_MessageManager.cpp	2012-09-10 22:10:38.454070303 +0100
+@@ -23,6 +23,29 @@
+   ==============================================================================
+ */
+ 
++//------------------------------------------------------------------------------
++// ****Twindy****
++void twindy_handleMapRequestEtc(void* event);
++
++void MessageManager::registerMapRequestCallback(MapRequestCallback* callback)
++{
++    mapRequestCallback = callback;
++}
++
++void MessageManager::deliverMapRequest(void* event)
++{
++    if (mapRequestCallback)
++        mapRequestCallback->callbackFunction(event);
++    else
++        /// The definition's in juce_linux_messaging.cpp.
++        /// It basically just does whatever the window sending it requests -
++        /// resizes it, moves it, maps it etc.
++        /// This is just in case...
++        twindy_handleMapRequestEtc(event);
++}
++// ****Twindy ends****
++//------------------------------------------------------------------------------
++
+ class MessageManager::QuitMessage   : public MessageManager::MessageBase
+ {
+ public:
+@@ -43,7 +66,9 @@
+   : quitMessagePosted (false),
+     quitMessageReceived (false),
+     messageThreadId (Thread::getCurrentThreadId()),
+-    threadWithLock (0)
++    threadWithLock (0),
++    // ****Twindy****
++    mapRequestCallback (nullptr)
+ {
+     if (JUCEApplicationBase::isStandaloneApp())
+         Thread::setCurrentThreadName ("Juce Message Thread");
+diff -U 3 -H -b -B -d -r -N -- modules.old/juce_events/messages/juce_MessageManager.h modules/juce_events/messages/juce_MessageManager.h
+--- modules.old/juce_events/messages/juce_MessageManager.h	2012-09-10 11:15:50.000000000 +0100
++++ modules/juce_events/messages/juce_MessageManager.h	2012-09-10 22:01:45.319426623 +0100
+@@ -31,6 +31,9 @@
+ class ActionListener;
+ class ActionBroadcaster;
+ 
++/// ****Twindy****
++class MapRequestCallback;
++
+ 
+ //==============================================================================
+ /** See MessageManager::callFunctionOnMessageThread() for use of this function type
+@@ -160,6 +163,13 @@
+     void deregisterBroadcastListener (ActionListener* listener);
+ 
+     //==============================================================================
++    /// ****Twindy****
++    /** Registers a callback object to call when a MapRequest or
++        ConfigureRequest event is called.  This is for window managers on linux.
++     */
++    void registerMapRequestCallback(MapRequestCallback* callback);
++
++    //==============================================================================
+     /** Internal class used as the base class for all message objects.
+         You shouldn't need to use this directly - see the CallbackMessage or Message
+         classes instead.
+@@ -183,6 +193,8 @@
+     // Internal methods - do not use!
+     void deliverBroadcastMessage (const String&);
+     ~MessageManager() noexcept;
++    /// ****Twindy****
++    void deliverMapRequest(void* event);
+    #endif
+ 
+ private:
+@@ -208,10 +220,32 @@
+     static void doPlatformSpecificShutdown();
+     static bool dispatchNextMessageOnSystemQueue (bool returnIfNoPendingMessages);
+ 
++    /// ****Twindy****
++    MapRequestCallback* mapRequestCallback;
++
+     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MessageManager);
+ };
+ 
+ 
++/// ****Twindy****
++/*!
++    A class representing a function to be called when a MapRequest or
++    ConfigureRequest event is received on linux, so window managers can take
++    care of window positioning, drawing title bars etc.
++ */
++class MapRequestCallback
++{
++  public:
++    /// Destructor.
++    virtual ~MapRequestCallback() {}
++    /*!
++        \param event This is always going to be an XEvent (at least on linux),
++        but I figured it would simplify dependencies to cast it to a void
++        pointer.
++     */
++    virtual void callbackFunction(void* event) = 0;
++};
++
+ //==============================================================================
+ /** Used to make sure that the calling thread has exclusive access to the message loop.
+ 
+diff -U 3 -H -b -B -d -r -N -- modules.old/juce_events/native/juce_linux_Messaging.cpp modules/juce_events/native/juce_linux_Messaging.cpp
+--- modules.old/juce_events/native/juce_linux_Messaging.cpp	2012-09-10 11:15:50.000000000 +0100
++++ modules/juce_events/native/juce_linux_Messaging.cpp	2012-09-10 22:19:59.044850126 +0100
+@@ -34,6 +34,43 @@
+ extern void juce_windowMessageReceive (XEvent* event);  // Defined in Windowing.cpp
+ extern void juce_handleSelectionRequest (XSelectionRequestEvent &evt);  // Defined in Clipboard.cpp
+ 
++//------------------------------------------------------------------------------
++// ****Twindy****
++// This is just to make sure things don't get messed up if a callback hasn't
++// been registered with the MessageManager.
++void twindy_handleMapRequestEtc(void* event)
++{
++    XWindowChanges windowChanges;
++    XEvent* evt = static_cast<XEvent*>(event);
++
++    if (evt->xany.type == MapRequest)
++    {
++        XMapWindow(display, evt->xmaprequest.window);
++    }
++    else if (evt->xany.type == ConfigureRequest)
++    {
++        windowChanges.x = evt->xconfigurerequest.x;
++        windowChanges.y = evt->xconfigurerequest.y;
++        windowChanges.width = evt->xconfigurerequest.width;
++        windowChanges.height = evt->xconfigurerequest.height;
++        windowChanges.sibling = evt->xconfigurerequest.above;
++        windowChanges.stack_mode = evt->xconfigurerequest.detail;
++        XConfigureWindow(display,
++                         evt->xconfigurerequest.window,
++                         evt->xconfigurerequest.value_mask,
++                         &windowChanges);
++    }
++    else if (evt->xany.type == CirculateRequest)
++    {
++        if (evt->xcirculaterequest.place == PlaceOnTop)
++            XRaiseWindow(display, evt->xcirculaterequest.window);
++        else
++            XLowerWindow(display, evt->xcirculaterequest.window);
++    }
++}
++//	****Twindy ends****
++//------------------------------------------------------------------------------
++
+ //==============================================================================
+ ScopedXLock::ScopedXLock()       { XLockDisplay (display); }
+ ScopedXLock::~ScopedXLock()      { XUnlockDisplay (display); }
+@@ -167,6 +204,11 @@
+ 
+         if (evt.type == SelectionRequest && evt.xany.window == juce_messageWindowHandle)
+             juce_handleSelectionRequest (evt.xselectionrequest);
++        // ****Twindy****
++        else if((evt.xany.type == MapRequest)||(evt.xany.type == ConfigureRequest)||(evt.xany.type == CirculateRequest)||(evt.xany.type == DestroyNotify)||(evt.xany.type == UnmapNotify)||
++                (evt.xany.type == EnterNotify)||(evt.xany.type == LeaveNotify)||(evt.xany.type == PropertyNotify))
++            MessageManager::getInstance()->deliverMapRequest(static_cast<void*>(&evt));
++        // ****Twindy ends****
+         else if (evt.xany.window != juce_messageWindowHandle)
+             juce_windowMessageReceive (&evt);
+ 
